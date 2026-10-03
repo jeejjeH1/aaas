@@ -116,3 +116,9 @@ import json
 manifest['cat'] = CAT_BOX
 json.dump(manifest, open(OUT + 'manifest.json', 'w'), indent=1)
 print({k: len(v) for k, v in manifest['words'].items()})
+
+# ---------- soft plate for motion scenes (hides inpainting seams) ----------
+soft = Image.fromarray(plate.clip(0, 255).astype(np.uint8)).resize((W // 4, H // 4), Image.BILINEAR)
+soft = soft.filter(ImageFilter.GaussianBlur(14)).resize((W // 2, H // 2), Image.BICUBIC)
+soft.save(OUT + 'plate_soft.jpg', quality=92)
+print('plate_soft done')

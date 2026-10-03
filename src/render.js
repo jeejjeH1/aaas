@@ -1,7 +1,8 @@
-// Render index.html frame-by-frame with headless Chromium and encode to MP4.
-//   node src/render.js                      -> out/startale-pieverse-motion.mp4
+// Render a page frame-by-frame with headless Chromium and encode to MP4 (+ soundtrack).
+//   node src/render.js                      -> out/startale-pieverse-promo.mp4
 //   node src/render.js --preview 1,3.5,7    -> out/preview/t*.jpg
-// Env: FPS (render rate, default 60; blended down to 30 for motion blur), WORKERS (default 4).
+// Env: PAGE (default promo.html), OUT, AUDIO (wav to mux), FPS (render rate, default 60;
+// blended down to 30 for motion blur), WORKERS (default 4).
 const { chromium } = require('/opt/node22/lib/node_modules/playwright');
 const { spawnSync } = require('child_process');
 const http = require('http');
@@ -14,7 +15,9 @@ const pi = args.indexOf('--preview');
 const preview = pi >= 0 ? args[pi + 1].split(',').map(Number) : null;
 const FPS = Number(process.env.FPS) || 60;
 const WORKERS = Number(process.env.WORKERS) || 4;
-const OUT = path.join(ROOT, 'out/startale-pieverse-motion.mp4');
+const PAGE = process.env.PAGE || 'promo.html';
+const OUT = path.join(ROOT, process.env.OUT || 'out/startale-pieverse-promo.mp4');
+const AUDIO = process.env.AUDIO ?? (PAGE === 'promo.html' ? 'assets/soundtrack.wav' : '');
 const FRAMES = path.join(ROOT, 'out/frames');
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg' };
@@ -30,7 +33,7 @@ const server = http.createServer((req, res) => {
 async function openPage(browser) {
   const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
   page.on('pageerror', (e) => console.log('[pageerror]', e.message));
-  await page.goto(`http://localhost:${server.address().port}/index.html`);
+  await page.goto(`http://localhost:${server.address().port}/${PAGE}`);
   await page.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
   return page;
 }
@@ -45,7 +48,7 @@ async function shoot(page, t, file) {
     const browser = await chromium.launch();
     const page = await openPage(browser);
     fs.mkdirSync(path.join(ROOT, 'out/preview'), { recursive: true });
-    for (const t of preview) await shoot(page, t, path.join(ROOT, `out/preview/t${t.toFixed(2)}.jpg`));
+    for (const t of preview) await shoot(page, t, path.join(ROOT, `out/preview/t${t.toFixed(2).padStart(5, '0')}.jpg`));
     await browser.close();
     return server.close();
   }
@@ -71,11 +74,12 @@ async function shoot(page, t, file) {
   }));
   server.close();
 
-  // blend pairs of frames for motion blur, then fade out to white
+  // blend pairs of frames for motion blur
   const blend = FPS >= 60 ? `tmix=frames=${Math.round(FPS / 30)},fps=30,` : '';
-  const r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-framerate', String(FPS), '-i', path.join(FRAMES, 'f%05d.jpg'),
+  const audio = AUDIO ? ['-i', path.join(ROOT, AUDIO), '-c:a', 'aac', '-b:a', '256k', '-shortest'] : [];
+  const r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-framerate', String(FPS), '-i', path.join(FRAMES, 'f%05d.jpg'), ...audio,
     '-vf', `${blend}format=yuv420p`,
-    '-c:v', 'libx264', '-preset', 'slow', '-crf', '16', '-movflags', '+faststart', OUT], { stdio: 'inherit' });
+    '-c:v', 'libx264', '-preset', 'slow', '-crf', '16', '-profile:v', 'high', '-movflags', '+faststart', OUT], { stdio: 'inherit' });
   if (r.status !== 0) process.exit(r.status);
   console.log('wrote', path.relative(ROOT, OUT), `in ${((Date.now() - t0) / 1000).toFixed(0)}s`);
 })();
