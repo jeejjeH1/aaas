@@ -1,0 +1,299 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Startale × Pieverse Motion</title>
+<style>
+  html, body { margin: 0; background: #000; overflow: hidden; }
+  #stage { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #fff; }
+  /* everything inside #cam is authored in the source image's 3840×2160 space */
+  #cam { position: absolute; left: 0; top: 0; width: 3840px; height: 2160px;
+         transform-origin: 0 0; transform: scale(.5);
+         perspective: 3200px; perspective-origin: 50% 50%; }
+  #world { position: absolute; inset: 0; transform-style: preserve-3d; transform-origin: 50% 50%; }
+  .G { position: absolute; inset: 0; transform-style: preserve-3d; transform-origin: 50% 50%; }
+  .L { position: absolute; display: block; transform-origin: 50% 50%; will-change: transform, opacity; }
+  #plate { left: 0; top: 0; width: 3840px; height: 2160px; }
+  .blob { position: absolute; border-radius: 50%; mix-blend-mode: multiply; }
+  .ring { position: absolute; border-radius: 50%; box-sizing: border-box; }
+  .shine { position: absolute; -webkit-mask-size: 100% 100%; mask-size: 100% 100%;
+           background: linear-gradient(100deg, transparent 0%, transparent 42%, #ff8bd8 46%, #fff 50%, #6fe7ff 54%, transparent 58%, transparent 100%);
+           background-size: 400% 100%; opacity: 0; }
+  #orig { position: absolute; inset: 0; width: 1920px; height: 1080px; opacity: 0; }
+  #fx { position: absolute; inset: 0; width: 1920px; height: 1080px; pointer-events: none; }
+  #sweep { position: absolute; inset: 0; mix-blend-mode: screen; opacity: 0;
+           background: linear-gradient(110deg, transparent 38%, rgba(255,255,255,.0) 42%, rgba(255,230,250,.85) 49%, rgba(220,250,255,.85) 51%, transparent 58%);
+           background-size: 300% 100%; }
+  #vignette { position: absolute; inset: 0; mix-blend-mode: multiply;
+              background: radial-gradient(ellipse at 50% 50%, transparent 55%, rgba(60,40,90,.35) 100%); }
+  #flash { position: absolute; inset: 0; background: #fff; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="cam">
+    <div id="world">
+      <div class="G" id="gBg">
+        <img class="L" id="plate" src="assets/layers/plate.jpg">
+        <div class="blob" id="b0"></div><div class="blob" id="b1"></div><div class="blob" id="b2"></div>
+      </div>
+      <div class="G" id="gDisc"></div>
+      <div class="G" id="gCatFx">
+        <div class="L" id="glow"></div>
+        <div class="ring" id="ring0"></div><div class="ring" id="ring1"></div>
+        <div class="L" id="shadow"></div>
+      </div>
+      <div class="G" id="gSub"></div>
+      <div class="G" id="gLogo"></div>
+      <div class="G" id="gH2"></div>
+      <div class="G" id="gH1"></div>
+      <div class="G" id="gCat"></div>
+    </div>
+  </div>
+  <canvas id="fx" width="1920" height="1080"></canvas>
+  <img id="orig" src="assets/source.jpg">
+  <div id="sweep"></div>
+  <div id="vignette"></div>
+  <div id="flash"></div>
+</div>
+
+<script>
+const DURATION = 14.5;
+const P = 3200;                      // perspective distance (px, 4K space)
+const $ = (id) => document.getElementById(id);
+
+// ---------- easing helpers ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const lerp = (a, b, k) => a + (b - a) * k;
+const eOutCubic = (x) => 1 - Math.pow(1 - x, 3);
+const eInOutCubic = (x) => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const eOutBack = (x, s = 1.70158) => 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2);
+const eOutExpo = (x) => x === 1 ? 1 : 1 - Math.pow(2, -10 * x);
+const eOutElastic = (x) => x === 0 ? 0 : x === 1 ? 1 : Math.pow(2, -10 * x) * Math.sin((x * 10 - .75) * (2 * Math.PI / 3)) + 1;
+const bell = (t, a, b) => { const k = prog(t, a, b); return Math.sin(k * Math.PI); };
+function rand(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+const hash = (n) => { const x = Math.sin(n * 127.1) * 43758.5453; return x - Math.floor(x); };
+
+// ---------- build layers from manifest ----------
+let M, layers = {};
+function addImg(group, name, box) {
+  const el = document.createElement('img');
+  el.className = 'L'; el.src = `assets/layers/${name}.png`;
+  Object.assign(el.style, { left: box[0] + 'px', top: box[1] + 'px', width: (box[2] - box[0]) + 'px', height: (box[3] - box[1]) + 'px' });
+  $(group).appendChild(el); layers[name] = el; return el;
+}
+function addShine(group, name, box) {
+  const el = document.createElement('div');
+  el.className = 'shine';
+  Object.assign(el.style, { left: box[0] + 'px', top: box[1] + 'px', width: (box[2] - box[0]) + 'px', height: (box[3] - box[1]) + 'px',
+    webkitMaskImage: `url(assets/layers/${name}.png)`, maskImage: `url(assets/layers/${name}.png)` });
+  $(group).appendChild(el); return el;
+}
+
+async function init() {
+  M = await (await fetch('assets/layers/manifest.json')).json();
+  addImg('gDisc', 'disclaimer', M.disclaimer);
+  addImg('gLogo', 'logo_startale', M.logo_startale);
+  addImg('gLogo', 'logo_divider', M.logo_divider);
+  addImg('gLogo', 'logo_pieverse', M.logo_pieverse);
+  M.words.headline1.forEach((b, i) => addImg('gH1', `headline1_w${i}`, b));
+  M.words.headline2.forEach((b, i) => addImg('gH2', `headline2_w${i}`, b));
+  M.words.subtitle.forEach((b, i) => addImg('gSub', `subtitle_w${i}`, b));
+  layers.shineH1 = addShine('gH1', 'headline1', M.headline1);
+  layers.shineH2 = addShine('gH2', 'headline2', M.headline2);
+  layers.shineSub = addShine('gSub', 'subtitle', M.subtitle);
+  addImg('gCat', 'cat', M.cat);
+  layers.shineCat = addShine('gCat', 'cat', M.cat);
+  layers.shineCat.style.background = 'linear-gradient(100deg, transparent 0%, transparent 44%, rgba(255,255,255,.75) 50%, transparent 56%, transparent 100%)';
+  layers.shineCat.style.backgroundSize = '400% 100%';
+
+  const c = M.cat, cx = (c[0] + c[2]) / 2, cy = (c[1] + c[3]) / 2;
+  Object.assign($('glow').style, { left: (cx - 1100) + 'px', top: (cy - 1100) + 'px', width: '2200px', height: '2200px', borderRadius: '50%',
+    background: 'radial-gradient(circle, rgba(255,160,225,.55) 0%, rgba(180,150,255,.35) 30%, rgba(120,225,255,.25) 50%, transparent 70%)' });
+  for (const id of ['ring0', 'ring1']) Object.assign($(id).style, { left: (cx - 700) + 'px', top: (c[3] - 900) + 'px', width: '1400px', height: '1400px',
+    border: '18px solid rgba(150,120,255,.8)', boxShadow: '0 0 60px rgba(120,220,255,.9), inset 0 0 60px rgba(255,140,220,.8)' });
+  Object.assign($('shadow').style, { left: (cx - 520) + 'px', top: (c[3] - 90) + 'px', width: '1040px', height: '150px', borderRadius: '50%',
+    background: 'radial-gradient(ellipse, rgba(40,20,70,.35), transparent 70%)' });
+  const blobs = [['b0', 1700, 'rgba(255,150,210,.45)'], ['b1', 1500, 'rgba(130,200,255,.45)'], ['b2', 1300, 'rgba(255,220,140,.4)']];
+  for (const [id, s, col] of blobs) Object.assign($(id).style, { width: s + 'px', height: s + 'px', background: `radial-gradient(circle, ${col}, transparent 68%)` });
+
+  await Promise.all([...document.images].map((im) => im.decode().catch(() => {})));
+  initParticles();
+  window.renderAt(0);
+  window.__ready = true;
+}
+
+// ---------- canvas particles: sparkles + floating Startale rings ----------
+const ctx = $('fx').getContext('2d');
+let sparks = [], rings = [];
+function initParticles() {
+  const r = rand(7);
+  const hues = ['#ff6fcf', '#7a6bff', '#2fd3ff', '#ffb547', '#ff8a8a', '#4be3a8'];
+  for (let i = 0; i < 70; i++) sparks.push({ x: r() * 1920, y: r() * 1080, z: .2 + r() * .8, s: 6 + r() * 16, c: hues[i % hues.length], ph: r() * 6.28, sp: .4 + r() * 1.2, born: .4 + r() * 3 });
+  for (let i = 0; i < 7; i++) rings.push({ x: 120 + r() * 1680, y: 120 + r() * 840, z: .15 + r() * .5, R: 30 + r() * 55, ph: r() * 6.28, sp: (r() - .5) * 1.4, tilt: r() * 6.28 });
+}
+function star(x, y, s, col, a) {
+  ctx.save(); ctx.translate(x, y); ctx.globalAlpha = a; ctx.fillStyle = col;
+  ctx.shadowColor = col; ctx.shadowBlur = s * 1.6;
+  ctx.beginPath();
+  for (let k = 0; k < 8; k++) { const rr = k % 2 ? s * .18 : s; const an = k * Math.PI / 4; ctx.lineTo(Math.cos(an) * rr, Math.sin(an) * rr); }
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+function logoRing(x, y, R, spin, tilt, a, blur) {
+  ctx.save(); ctx.translate(x, y); ctx.globalAlpha = a; ctx.filter = `blur(${blur}px)`;
+  const sq = R * .5;
+  for (let k = 0; k < 8; k++) {
+    const an = k * Math.PI / 4 + spin;
+    const px = Math.cos(an) * R * Math.cos(tilt), py = Math.sin(an) * R;
+    const depth = .75 + .25 * Math.sin(an) * Math.sin(tilt);
+    ctx.save(); ctx.translate(px, py); ctx.rotate(an + Math.PI / 4); ctx.scale(Math.abs(Math.cos(tilt)) * .6 + .4, 1);
+    const g = ctx.createLinearGradient(-sq / 2, -sq / 2, sq / 2, sq / 2);
+    g.addColorStop(0, `rgba(90,90,100,${depth})`); g.addColorStop(1, `rgba(20,20,26,${depth})`);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.roundRect(-sq / 2, -sq / 2, sq, sq, sq * .18); ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+function drawFx(t, cam) {
+  ctx.clearRect(0, 0, 1920, 1080);
+  const fade = 1 - .85 * prog(t, 11.6, 12.8);
+  for (const r of rings) {
+    const a = .22 * prog(t, 1.2, 2.6) * (1 - prog(t, 11.4, 12.6));
+    if (a <= 0) continue;
+    const x = r.x - cam.ry * 22 * r.z * 3 - cam.tx * .5 * r.z / 2, y = r.y + Math.sin(t * .6 + r.ph) * 25 + cam.rx * 18 * r.z * 3;
+    logoRing(x, y, r.R, t * r.sp + r.ph, r.tilt + t * .8, a, (1 - r.z) * 6);
+  }
+  for (const s of sparks) {
+    const life = prog(t, s.born, s.born + .6);
+    if (life <= 0) continue;
+    const tw = .55 + .45 * Math.sin(t * 4 * s.sp + s.ph);
+    let x = s.x - cam.ry * 30 * s.z - cam.tx * .25 * s.z, y = s.y - ((t * 40 * s.sp * s.z) % 1300) + cam.rx * 25 * s.z;
+    y = ((y % 1200) + 1200) % 1200 - 60;
+    star(x, y, s.s * s.z * (.6 + .4 * tw), s.c, life * tw * .9 * fade);
+  }
+}
+
+// ---------- camera ----------
+function camera(t) {
+  const amp = eInOutCubic(prog(t, 3.0, 5.5)) * (1 - eInOutCubic(prog(t, 10.6, 12.2)));
+  let ry = amp * 12 * Math.sin((t - 3) * .95);
+  let rx = amp * 5 * Math.sin((t - 3) * .7 + 1.1);
+  let rz = amp * 1.2 * Math.sin((t - 3) * .5);
+  // zoom punch toward the cat
+  const punch = eInOutCubic(bell(t, 8.9, 10.9));
+  let tz = punch * 900, tx = -punch * 650, ty = punch * 80;
+  // landing shake when the cat lands
+  const sh = prog(t, 3.55, 4.3);
+  if (sh > 0 && sh < 1) { const d = Math.pow(1 - sh, 2); tx += Math.sin(sh * 60) * 28 * d; ty += Math.cos(sh * 53) * 22 * d; rz += Math.sin(sh * 40) * .6 * d; }
+  // intro dolly
+  tz += (1 - eOutCubic(prog(t, 0, 3.2))) * -500;
+  return { rx, ry, rz, tx, ty, tz };
+}
+
+// depth factor: layers spread in Z for parallax, flatten back for the end card
+const depthAt = (t) => 1 - eInOutCubic(prog(t, 10.9, 12.3));
+
+function setGroup(id, z, d) {
+  const zz = z * d;
+  $(id).style.transform = `translateZ(${zz}px) scale(${(P - zz) / P})`;
+}
+const T = (el, tf, op) => { el.style.transform = tf; if (op !== undefined) el.style.opacity = op; };
+
+// ---------- master render ----------
+window.renderAt = function (t) {
+  const cam = camera(t), d = depthAt(t);
+  $('world').style.transform = `translate3d(${cam.tx}px,${cam.ty}px,${cam.tz}px) rotateX(${cam.rx}deg) rotateY(${cam.ry}deg) rotateZ(${cam.rz}deg)`;
+
+  // group depths
+  setGroup('gBg', -1100, d); setGroup('gDisc', -120, d); setGroup('gCatFx', 260, d);
+  setGroup('gSub', 120, d); setGroup('gLogo', 200, d); setGroup('gH2', 300, d); setGroup('gH1', 420, d); setGroup('gCat', 520, d);
+
+  // background: zoom-in from blur, oversized while the camera moves
+  const intro = eOutCubic(prog(t, 0, 3.2));
+  const bgScale = 1 + .3 * (1 - intro) + .18 * d;
+  T($('plate'), `scale(${bgScale})`);
+  $('plate').style.filter = `blur(${10 + 40 * (1 - eOutCubic(prog(t, 0, 1.8)))}px) saturate(${1.15 + .25 * d})`;
+  const bl = [['b0', 600, 500, .31], ['b1', 3000, 600, .23], ['b2', 1500, 1700, .27]];
+  bl.forEach(([id, x, y, f], i) => {
+    const s = parseFloat($(id).style.width) / 2;
+    T($(id), `translate(${x - s + Math.sin(t * f * 2 + i) * 500}px, ${y - s + Math.cos(t * f * 1.6 + i * 2) * 300}px)`, .9 * d * prog(t, .2, 1.5));
+  });
+
+  // logos
+  { const k = eOutBack(prog(t, 2.2, 3.0));
+    T(layers.logo_startale, `translateX(${(1 - k) * -600}px) rotateY(${(1 - k) * 75}deg)`, prog(t, 2.2, 2.6));
+    const kd = eOutExpo(prog(t, 2.7, 3.1));
+    T(layers.logo_divider, `scaleY(${kd})`, kd);
+    const kp = eOutBack(prog(t, 2.8, 3.6));
+    T(layers.logo_pieverse, `translateX(${(1 - kp) * 600}px) rotateY(${(1 - kp) * -75}deg)`, prog(t, 2.8, 3.2)); }
+
+  // "$5." hero intro: pops big in the centre, glitches, then flies home
+  { const b = M.words.headline1[1], hx = (b[0] + b[2]) / 2, hy = (b[1] + b[3]) / 2;
+    const pop = eOutElastic(prog(t, .25, 1.15));
+    const fly = eInOutCubic(prog(t, 1.55, 2.2));
+    const big = lerp(3.4 + .3 * prog(t, 1.0, 1.55), 1, fly) * pop;
+    const x = lerp(1920 - hx, 0, fly), y = lerp(1080 - hy, 0, fly);
+    const spin = (1 - fly) * 0 + Math.sin(fly * Math.PI) * 30;
+    // 4K space offsets: the group is scaled, so move in group space
+    T(layers.headline1_w1, `translate3d(${x}px, ${y}px, ${Math.sin(fly * Math.PI) * 400}px) rotateX(${spin}deg) scale(${Math.max(big, .001)})`, prog(t, .25, .4));
+    const glitch = (t > .45 && t < 1.5 && hash(Math.floor(t * 30)) > .55) || (t > 2.18 && t < 2.4) || (t > 9.85 && t < 10.15 && hash(Math.floor(t * 30) + 3) > .3);
+    if (glitch) { const o = 6 + hash(Math.floor(t * 30) + 9) * 18;
+      layers.headline1_w1.style.filter = `drop-shadow(${o}px 0 0 rgba(255,0,140,.85)) drop-shadow(${-o * 1.4}px 0 0 rgba(0,210,255,.85))`;
+    } else layers.headline1_w1.style.filter = 'none';
+    const kd = eOutBack(prog(t, 2.05, 2.7));
+    T(layers.headline1_w0, `translateX(${(1 - kd) * -500}px) rotateY(${(1 - kd) * -95}deg)`, prog(t, 2.05, 2.35)); }
+
+  // cat: flies out of the deep, spinning, lands with a shockwave
+  { const k = prog(t, 2.5, 3.6), e = eOutCubic(k);
+    const idle = d * prog(t, 4.2, 5);
+    const fy = Math.sin(t * 2.2) * 28 * idle, frot = Math.sin(t * 1.3) * 4 * idle;
+    const zIn = (1 - e) * -6000;
+    T(layers.cat, `translate3d(${(1 - e) * 900}px, ${(1 - e) * -400 + fy + (k < 1 ? 0 : 0)}px, ${zIn}px) rotateY(${(1 - e) * 720 + frot}deg) rotateZ(${(1 - e) * -25 + Math.sin(t * 1.7) * 1.5 * idle}deg) scale(${1 + .06 * bell(t, 3.55, 3.85)}, ${1 - .06 * bell(t, 3.55, 3.85)})`,
+      prog(t, 2.5, 2.8));
+    layers.cat.style.filter = `blur(${(1 - eOutCubic(prog(t, 2.5, 3.4))) * 18}px)`;
+    T($('shadow'), `scale(${1 - fy / 300})`, .9 * prog(t, 3.3, 3.7) * d);
+    T($('glow'), `scale(${.8 + .15 * Math.sin(t * 2) + .4 * bell(t, 3.5, 4.4) + .3 * bell(t, 9.2, 10.6)})`, (.75 + .25 * Math.sin(t * 3)) * prog(t, 3.0, 3.8) * d);
+    const r0 = prog(t, 3.55, 4.5), r1 = prog(t, 3.7, 4.8);
+    T($('ring0'), `rotateX(72deg) scale(${.2 + 1.3 * eOutCubic(r0)})`, r0 > 0 && r0 < 1 ? (1 - r0) : 0);
+    T($('ring1'), `rotateX(72deg) scale(${.2 + 1.7 * eOutCubic(r1)})`, r1 > 0 && r1 < 1 ? (1 - r1) * .7 : 0);
+  }
+
+  // headline line 2: 3D flip per word
+  M.words.headline2.forEach((_, i) => {
+    const a = 3.15 + i * .14, k = prog(t, a, a + .75), e = eOutBack(k, 1.4);
+    const el = layers[`headline2_w${i}`];
+    T(el, `translate3d(0, ${(1 - e) * 160}px, ${(1 - e) * -500}px) rotateX(${(1 - e) * 95}deg)`, prog(t, a, a + .25));
+    el.style.filter = `blur(${(1 - eOutCubic(k)) * 14}px)`;
+  });
+  // subtitle: word cascade
+  M.words.subtitle.forEach((_, i) => {
+    const a = 4.1 + i * .055, k = prog(t, a, a + .55), e = eOutCubic(k);
+    T(layers[`subtitle_w${i}`], `translate3d(0, ${(1 - e) * 70}px, 0) rotateY(${(1 - e) * 50}deg) scale(${.7 + .3 * eOutBack(k)})`, e);
+  });
+  T(layers.disclaimer, `translateY(${(1 - eOutCubic(prog(t, 4.9, 5.8))) * 40}px)`, eOutCubic(prog(t, 4.9, 5.8)));
+
+  // iridescent shine sweeps
+  const shine = (el, a, b) => { const k = prog(t, a, b); el.style.opacity = k > 0 && k < 1 ? 1 : 0; el.style.backgroundPosition = `${100 - k * 100}% 0`; };
+  shine(layers.shineH1, 5.6, 6.6); shine(layers.shineH2, 5.9, 7.0); shine(layers.shineSub, 6.3, 7.3);
+  if (t > 7.6 && t < 8.6) shine(layers.shineH1, 7.6, 8.6);
+  shine(layers.shineCat, 4.4, 5.3);
+  if (t > 9.6) shine(layers.shineCat, 9.6, 10.5);
+  layers.shineCat.style.opacity = parseFloat(layers.shineCat.style.opacity) * .6;
+  if (t > 8.2 && t < 9.3) shine(layers.shineH2, 8.2, 9.3);
+
+  // end card: crossfade onto the pixel-exact original artwork
+  $('orig').style.opacity = eInOutCubic(prog(t, 12.2, 12.9));
+  const sw = prog(t, 12.7, 13.7);
+  $('sweep').style.opacity = sw > 0 && sw < 1 ? .9 : (t > 6.5 && t < 7.5 ? .5 : 0);
+  $('sweep').style.backgroundPosition = `${100 - (sw > 0 ? sw : prog(t, 6.5, 7.5)) * 100}% 0`;
+  $('vignette').style.opacity = d;
+  $('flash').style.opacity = 1 - eOutCubic(prog(t, 0, .55)) + .55 * bell(t, 3.55, 3.75) + .35 * bell(t, 2.15, 2.3);
+
+  drawFx(t, cam);
+};
+
+init();
+</script>
+</body>
+</html>
